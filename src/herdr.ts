@@ -108,6 +108,7 @@ function runHerdr<T = unknown>(
 	opts: HerdrOpts = {},
 ): Promise<Result<T>> {
 	const timeoutMs = opts.timeoutMs ?? 60_000;
+	if (opts.signal?.aborted) return Promise.resolve(err("TIMEOUT", "herdr command aborted before dispatch"));
 	return new Promise<Result<T>>((resolve) => {
 		let bin: string;
 		try {
@@ -223,7 +224,7 @@ function runHerdr<T = unknown>(
 						exitCode,
 						stderr,
 						stdout: out,
-					}),
+					}, "unknown"),
 				);
 				return;
 			}
@@ -237,6 +238,7 @@ function runHerdr<T = unknown>(
 						mapCode(String(json.error.code ?? "")),
 						String(json.error.message ?? "herdr error"),
 						json.error,
+						typeof json.error.code === "string" && typeof json.error.message === "string" ? "rejected" : "unknown",
 					),
 				);
 				return;
@@ -250,8 +252,9 @@ function err(
 	code: HerdrErrorCode,
 	message: string,
 	details?: unknown,
+	outcome?: "rejected" | "unknown",
 ): Result<never> {
-	return { ok: false, error: { code, message, details } };
+	return { ok: false, error: { code, message, details, ...(outcome ? { outcome } : {}) } };
 }
 
 function msg(e: unknown): string {

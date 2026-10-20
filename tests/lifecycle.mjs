@@ -82,6 +82,7 @@ const record = (over = {}) => ({
 	sawWorking: true,
 	paneId: "w1:p9",
 	stance: "interactive",
+	origin: { sessionId: "lifecycle-test", paneId: "w1:p1", cwd: ROOT },
 	...over,
 });
 const registryWith = (records) => () => {
@@ -89,6 +90,13 @@ const registryWith = (records) => () => {
 	for (const r of records) m.set(r.name, r);
 	return m;
 };
+const placement = (paneId, onAllocate = () => {}) => ({
+	allocate: async (input) => {
+		onAllocate(input);
+		return { ok: true, data: { mode: "split", paneId: typeof paneId === "function" ? paneId() : paneId } };
+	},
+	resolveWorkspace: async () => { throw new Error("unexpected tab lookup"); },
+});
 const DEPS = (over = {}) => ({
 	registry: registryWith([]),
 	agentGet: okGet("w1:p1", "scout", "working"),
@@ -557,6 +565,7 @@ console.log("\n[6] Resume — happy path: relaunch on the retained session");
 			env: {},
 			childExtension: "child.ts",
 			autodrain: false,
+			placement: placement("w2:p5"),
 			start: async (input) => {
 				calls.start.push(input);
 				return { ok: true, data: { agent: { pane_id: "w2:p5" } } };
@@ -636,6 +645,7 @@ console.log("\n[6] Resume — happy path: relaunch on the retained session");
 			childExtension: "child.ts",
 			autodrain: false,
 			agentDirs: dirs,
+			placement: placement("w2:p6"),
 			start: async () => ({ ok: true, data: { agent: { pane_id: "w2:p6" } } }),
 			boot: async () => ({ ok: true, data: true }),
 			submit: async () => ({ ok: true, data: true }),
@@ -661,6 +671,7 @@ console.log("\n[6] Resume — happy path: relaunch on the retained session");
 			autodrain: false,
 			agentsDirsMarker: undefined,
 			agentDirs: dirs,
+			placement: placement("w2:p7"),
 			start: async () => ({ ok: true, data: { agent: { pane_id: "w2:p7" } } }),
 			boot: async () => ({ ok: true, data: true }),
 			submit: async () => ({ ok: true, data: true }),
@@ -705,6 +716,7 @@ console.log("\n[7] Resume — queue at cap, silent resume, isolated worktree kep
 		env: {},
 		childExtension: "child.ts",
 		autodrain: false,
+		placement: placement(() => `w3:p${starts.length + 1}`),
 		start: async (input) => {
 			starts.push(input);
 			return { ok: true, data: { agent: { pane_id: `w3:p${starts.length}` } } };
@@ -792,10 +804,8 @@ console.log("\n[7] Resume — queue at cap, silent resume, isolated worktree kep
 				worktreeCalls++;
 				return { ok: true, data: join(dir, "other-wt") };
 			},
-			start: async (input) => {
-				startedCwd = input.cwd;
-				return { ok: true, data: { agent: { pane_id: "w4:p1" } } };
-			},
+			placement: placement("w4:p1", (input) => { startedCwd = input.cwd; }),
+			start: async () => ({ ok: true, data: { agent: { pane_id: "w4:p1" } } }),
 		},
 	);
 	assert(rw.ok, "isolated resume succeeds");
@@ -830,6 +840,7 @@ console.log("\n[8] The spawn-time definition snapshot precedes routing");
 			},
 			list: async () => [],
 			kinds: async () => ["pi", "claude"],
+			placement: placement("w9:p1"),
 			start: async (input) => {
 				calls.start.push(input);
 				return { ok: true, data: { agent: { pane_id: "w9:p1" } } };
@@ -866,6 +877,7 @@ console.log("\n[8] The spawn-time definition snapshot precedes routing");
 			env: {},
 			childExtension: "child.ts",
 			autodrain: false,
+			placement: placement("w9:p2"),
 			start: async (input) => {
 				calls.start.push(input);
 				return { ok: true, data: { agent: { pane_id: "w9:p2" } } };
@@ -892,6 +904,7 @@ console.log("\n[8] The spawn-time definition snapshot precedes routing");
 			env: {},
 			childExtension: "child.ts",
 			autodrain: false,
+			placement: placement("w9:p3"),
 			start: async (input) => {
 				calls.start.push(input);
 				return { ok: true, data: { agent: { pane_id: "w9:p3" } } };

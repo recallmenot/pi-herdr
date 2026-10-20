@@ -526,6 +526,7 @@ console.log("\n[8] Launch plan — --session + -e injection and registry growth"
 {
 	const dir = mkdtempSync(join(tmpdir(), "pi-herdr-plan-"));
 	const started = [];
+	let allocated;
 	const deps = {
 		load: () => ({
 			agents_kill_switch: false,
@@ -539,8 +540,15 @@ console.log("\n[8] Launch plan — --session + -e injection and registry growth"
 		}),
 		kinds: async () => ["pi", "claude"],
 		list: async () => [],
+		placement: {
+			allocate: async (input) => {
+				allocated = input;
+				return { ok: true, data: { mode: "split", paneId: "w1:p9" } };
+			},
+			resolveWorkspace: async () => { throw new Error("unexpected tab lookup"); },
+		},
 		start: async (input) => {
-			started.push(input);
+			started.push({ ...allocated, ...input });
 			return { ok: true, data: { agent: { pane_id: "w1:p9" } } };
 		},
 		boot: async () => ({ ok: true, data: true }),

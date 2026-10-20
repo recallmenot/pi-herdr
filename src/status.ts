@@ -155,6 +155,7 @@ export function activeDetail(
  * pane-inspection fact set + the two sidecar reads. Pure input — offline
  * tests fake all of it. */
 export interface ProjectionObs {
+	starting?: boolean;
 	/** herdr's coarse agent_status (idle/working/blocked/done/unknown) when
 	 * the pane is present in the fleet. */
 	live?: string;
@@ -215,6 +216,7 @@ export function isSubstrateChild(record: {
  *   2. no pane → queued                           (registry / cap queue)
  *   3. delivery consumed → pane? waiting : gone   (registry; terminal row)
  *   4. completion sidecar → finalizing            (sidecar; push in flight)
+ *   Active startup holds starting/blocked ahead of absence and watchdog state.
  *   5. pane absent, no sidecar → stalled          (watchdog: a sidecar-less
  *      death is already a stall; the delivery pass's bounded grace resolves
  *      the terminal answer afterwards)
@@ -275,6 +277,8 @@ export function projectStatus(
 	// flight. Wins over pane presence/absence alike (an auto-exited child is
 	// already gone from the fleet when its sidecar lands).
 	if (obs.sidecar) return { status: "finalizing" };
+
+	if (obs.starting) return { status: obs.live === "blocked" ? "blocked" : "starting" };
 
 	if (obs.absent) return { status: "stalled" };
 

@@ -16,6 +16,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { fleetList, herdr } from "../herdr.js";
+import type { PlacementCommand } from "../placement.js";
 import { getAgentKinds } from "../config.js";
 import {
 	type NormalizedAgent,
@@ -24,7 +25,7 @@ import {
 	type Result,
 	type ToolReturn,
 } from "../env.js";
-import { spawnRecords, type SpawnRecord } from "../spawn.js";
+import { spawnRecords, isRecordStarting, type SpawnRecord } from "../spawn.js";
 import { readExitSidecar, type ReadSidecarResult } from "../sessionfile.js";
 import {
 	isSubstrateChild,
@@ -62,31 +63,15 @@ function okText(text: string, details: unknown): ToolReturn {
 
 // ---- agent start: the single launch path ----------------------------------
 // herdr >= 0.9.0 `agent start <name> --kind <kind> --pane <id> [-- <agentArgs>]`:
-// split a pane (caller-chosen — the golden-spiral layout in src/spawn.ts),
-// then attach the agent by kind — on every
-// OS (0.9.0 fixed the Windows shim launch + flaky process-tree detection;
-// validated e2e on Windows by tests/win-start.mjs). herdr resolves the kind
-// to its CLI itself, so there is no local argv/preset machinery. tab/workspace
-// targeting has no `agent start` equivalent (pane split has none), so those
-// inputs are ignored and the pane lands in the current tab.
 
 // Valid agent kinds live in src/config.ts (getAgentKinds: live `herdr agent`
 // list, cached per session, with AGENT_KINDS_FALLBACK for offline herdr).
 
 interface StartInput {
 	name: string;
+	paneId: string;
 	agent?: string;
-	agentArgs?: string[]; // extra flags appended to the agent CLI (e.g. ["-ne","-e","./src/index.ts"])
-	cwd?: string;
-	split?: "right" | "down";
-	/** Explicit pane to split (golden-spiral layout); absent → `--current`. */
-	splitFrom?: string;
-	/** Split ratio — the EXISTING pane's share (verified herdr 0.9.1). */
-	ratio?: number;
-	tabId?: string;
-	workspaceId?: string;
-	env?: Record<string, string>;
-	focus?: boolean;
+	agentArgs?: string[];
 	signal?: AbortSignal;
 }
 
@@ -113,66 +98,19 @@ export function kindError(
 	);
 }
 
-/** Tolerantly pull a pane id out of a `pane split` / `agent start` result. */
-function extractPaneId(d: unknown): string | undefined {
-	if (!d || typeof d !== "object") return undefined;
-	const o = d as Record<string, unknown>;
-	const pane =
-		o.pane && typeof o.pane === "object"
-			? (o.pane as Record<string, unknown>)
-			: o;
-	for (const k of ["pane_id", "paneId", "id"]) {
-		if (typeof pane[k] === "string") return pane[k] as string;
-	}
-	return undefined;
-}
-
-/**
- * The one launch path: validate the kind, split a pane (the caller picks the
- * target — the golden-spiral layout in src/spawn.ts), then attach the agent
- * with `agent start --kind` (retrying briefly while the
- * freshly-split shell reaches its prompt — `agent_pane_busy`).
- */
+/** Attach to the reserved pane, retrying only the fresh shell's busy state. */
 export async function startHerdrAgent(
 	input: StartInput,
-): Promise<Result<{ agent: Record<string, unknown> }>> {
-	// Without --cwd, herdr spawns the pane in the DAEMON's cwd (home folder for a
-	// restored headless session), not the caller's project. Default to this pi
-	// process's cwd so spawned agents land in the session root.
-	input.cwd ??= process.cwd();
-
+	deps: { command?: PlacementCommand; kinds?: () => Promise<string[]> } = {},
+): Promise<Result<true>> {
 	// `agent start` takes --kind, not a raw command. Validate the kind against
 	// the live `herdr agent` kind list (cached, hardcoded fallback) so an
 	// unknown kind fails fast with a clear error instead of a server-side 400.
 	const kind = (input.agent ?? "pi").toLowerCase();
-	const bad = kindError(kind, await getAgentKinds());
+	const bad = kindError(kind, await (deps.kinds ?? getAgentKinds)());
 	if (bad) return bad;
 
-	// 1. create the pane (`agent start` needs an existing pane at a shell prompt).
-	//    Golden-spiral layout: the caller (src/spawn.ts) picks the target — the
-	//    spawner's pane for spawn #1, the previous child's for #2+, alternating
-	//    right/down. No explicit pane → `--current` (verified: resolves via the
-	//    caller's HERDR_PANE_ID, not the focused pane). `--ratio` favors the
-	//    EXISTING pane, so the source always keeps the larger share.
-	const splitArgs = ["pane", "split"];
-	if (input.splitFrom) splitArgs.push(input.splitFrom);
-	else splitArgs.push("--current");
-	splitArgs.push("--direction", input.split ?? "right");
-	splitArgs.push("--ratio", String(input.ratio ?? 0.6));
-	if (input.cwd) splitArgs.push("--cwd", input.cwd);
-	if (input.env)
-		for (const [k, v] of Object.entries(input.env))
-			splitArgs.push("--env", `${k}=${v}`);
-	if (input.focus) splitArgs.push("--focus");
-	const splitR = await herdr<unknown>(splitArgs, {
-		timeoutMs: 20_000,
-		signal: input.signal,
-	});
-	if (!splitR.ok) return splitR;
-	const paneId = extractPaneId(splitR.data);
-	if (!paneId) {
-		return err("PANE_GONE", "herdr pane split returned no pane id", splitR.data);
-	}
+	const paneId = input.paneId;
 
 	// 2. attach the agent to the pane by kind. `agent start --kind` can fail
 	//    fast with `agent_pane_busy` while the freshly-split shell reaches its
@@ -190,9 +128,10 @@ export async function startHerdrAgent(
 	// `-e ./src/index.ts`) so a spawned agent can load a local extension.
 	if (input.agentArgs?.length) startArgs.push("--", ...input.agentArgs);
 	const deadline = Date.now() + 6_000;
-	let startR: Result<{ agent?: Record<string, unknown> }>;
+	let startR: Result<unknown>;
 	do {
-		startR = await herdr<{ agent?: Record<string, unknown> }>(startArgs, {
+		if (input.signal?.aborted) return err("TIMEOUT", "Agent attachment aborted.", { paneId });
+		startR = await (deps.command ?? herdr)(startArgs, {
 			timeoutMs: 20_000,
 			signal: input.signal,
 		});
@@ -202,15 +141,7 @@ export async function startHerdrAgent(
 		await sleep(250);
 	} while (true);
 	if (!startR.ok) return startR;
-	return {
-		ok: true,
-		data: {
-			agent: (startR.data?.agent ?? { pane_id: paneId }) as Record<
-				string,
-				unknown
-			>,
-		},
-	};
+	return { ok: true, data: true };
 }
 
 /**
@@ -577,6 +508,7 @@ function projectedLabel(
 			(deps.readSidecar ?? readExitSidecar)(record.sessionPath).state === "ok",
 	);
 	const proj = projectStatus(record, {
+		starting: isRecordStarting(record),
 		live,
 		absent,
 		unhealthy: false,

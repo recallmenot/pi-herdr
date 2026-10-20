@@ -34,7 +34,7 @@ import {
 	type ExtractedResult,
 	type ReadSidecarResult,
 } from "./sessionfile.js";
-import { spawnRecords, type SpawnRecord } from "./spawn.js";
+import { spawnRecords, isRecordStarting, type SpawnRecord } from "./spawn.js";
 import {
 	formatAge,
 	isSubstrateChild,
@@ -469,6 +469,7 @@ export async function fleetWidgetOnce(deps: WidgetDeps = {}): Promise<void> {
 		const paneId = record.paneId;
 		const activity = readActivity(record.activityPath); // one read per tick
 		const proj = projectStatus(record, {
+			starting: isRecordStarting(record),
 			live: paneId ? live.get(paneId) : undefined,
 			absent: fleetOk && paneId !== undefined && !live.has(paneId),
 			unhealthy: !fleetOk,

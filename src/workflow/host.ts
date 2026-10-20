@@ -36,6 +36,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { herdr } from "../herdr.js";
 import {
+	captureSpawnOrigin,
 	spawnAgent as spawnEngineAgent,
 	spawnRecords,
 	type SpawnRecord,
@@ -115,12 +116,15 @@ export function createWorkflowHost(deps: WorkflowHostDeps): WorkflowHost {
 	 * the whole run: `resume` reaches a child that has already settled. */
 	const handles = new Map<string, string>();
 	const records = deps.records ?? spawnRecords;
+	const origin = captureSpawnOrigin(deps.ctx);
 
 	/** The engine deps every spawn/resume carries: this session's routing
 	 * context plus the run's abort signal. */
 	function engineDeps(): SpawnDeps {
 		return {
 			signal: deps.signal,
+			origin,
+			parentSession: origin.sessionFile,
 			parent: deps.ctx?.model
 				? { model: { provider: deps.ctx.model.provider, id: deps.ctx.model.id } }
 				: undefined,
@@ -274,6 +278,7 @@ export function createWorkflowHost(deps: WorkflowHostDeps): WorkflowHost {
 					...(request.effort !== undefined ? { thinking: request.effort } : {}),
 					...(request.isolation === "worktree" ? { isolated: true } : {}),
 					name: request.label,
+					workflow: deps.runId,
 					...(extraEnv !== undefined ? { extraEnv } : {}),
 					wait: false,
 				},

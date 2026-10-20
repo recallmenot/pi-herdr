@@ -23,7 +23,7 @@ export interface Ok<T> {
 }
 export interface Err {
 	ok: false;
-	error: { code: HerdrErrorCode; message: string; details?: unknown };
+	error: { code: HerdrErrorCode; message: string; details?: unknown; outcome?: "rejected" | "unknown" };
 }
 /** Uniform result envelope used across every tool/herdr call. */
 export type Result<T> = Ok<T> | Err;

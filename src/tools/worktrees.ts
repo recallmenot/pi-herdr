@@ -96,10 +96,9 @@ export function extractWorktree(d: unknown): NormalizedWorktree {
 
 // ---- pure argv builders (unit-testable offline) ----------------------------
 
-/** `worktree create [--workspace] [--cwd] [--branch] [--base] [--path] [--label] [--focus|--no-focus] --json` */
-export function createWorktreeArgs(opts: {
-	workspaceId?: string;
-	cwd?: string;
+type WorktreeSource = { workspaceId: string; cwd?: never } | { cwd?: string; workspaceId?: never };
+
+export function createWorktreeArgs(opts: WorktreeSource & {
 	branch?: string;
 	base?: string;
 	path?: string;

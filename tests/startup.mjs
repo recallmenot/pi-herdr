@@ -13,7 +13,6 @@ const spawn = await jiti.import("../src/spawn.js");
 const { DEFAULT_SETTINGS } = await jiti.import("../src/settings.ts");
 const ok = (data) => ({ ok: true, data });
 const fail = (code, message, details) => ({ ok: false, error: { code, message, details } });
-const pane = (id = "w1:p2") => ok({ agent: { pane_id: id } });
 function deferred() {
 	let resolve;
 	const promise = new Promise((r) => { resolve = r; });
@@ -23,7 +22,7 @@ function record(over = {}) {
 	return {
 		name: "blocker", kind: "claude", prompt: "work", agentArgs: [], depth: 2,
 		isolated: false, spawnedAt: 1, submitted: false, sawWorking: false,
-		stance: "interactive", ...over,
+		stance: "interactive", origin: { sessionId: "startup-test", cwd: process.cwd() }, ...over,
 	};
 }
 function harness(over = {}) {
@@ -34,7 +33,9 @@ function harness(over = {}) {
 		kinds: async () => ["pi", "claude"],
 		list: async () => [],
 		paneList: async () => [],
-		start: async (input) => { starts.push(input); return pane(); },
+		origin: { sessionId: "startup-test", cwd: process.cwd() },
+		placement: { allocate: async () => ok({ mode: "split", paneId: "w1:p2" }) },
+		start: async (input) => { starts.push(input); return ok(true); },
 		boot: async () => ok(true),
 		submit: async (id, text) => { submissions.push({ id, text }); return ok(true); },
 		status: async () => ok("working"),
@@ -68,7 +69,7 @@ await test("overlapping starts share one handoff and completed records never sta
 	const first = spawn.startRecordNow(rec, h.deps);
 	await entered.promise;
 	const second = spawn.startRecordNow(rec, h.deps);
-	release.resolve(pane());
+	release.resolve(ok(true));
 	const results = await Promise.all([first, second]);
 	assert(results.every((r) => r.ok && r.data.paneId === "w1:p2"));
 	assert.equal(h.starts.length, 1, "only one pane is created for an accepted record");
@@ -106,7 +107,7 @@ await test("a drain skips records whose direct start is in flight", async () => 
 	const starting = spawn.startRecordNow(rec, h.deps);
 	await entered.promise;
 	const drain = spawn.drainQueueOnce(h.deps);
-	release.resolve(pane());
+	release.resolve(ok(true));
 	assert.equal((await starting).ok, true);
 	assert.equal(await drain, 0);
 	assert.equal(h.starts.length, 1);
@@ -125,7 +126,11 @@ await test("failed and thrown starts stay inspectable and cannot be retried by a
 		assert.equal(await spawn.drainQueueOnce(h.deps), 0);
 		assert.match(rec.startError, throws ? /start seam threw/ : /attachment refused/);
 		assert.equal(rec.startFailure.code, "AGENT_START_FAILED");
-		if (!throws) assert.deepEqual(rec.startFailure, failure.error);
+		if (!throws) {
+			assert.equal(rec.startFailure.code, failure.error.code);
+			assert.match(rec.startFailure.message, /attachment refused/);
+			assert.equal(rec.startFailure.details.phase, "attachment");
+		}
 		assert.equal(await spawn.currentStatus(rec, h.deps), "gone");
 		const inspected = await getAgentResult({ target: rec.name, wait: true });
 		assert.equal(inspected.ok, true);

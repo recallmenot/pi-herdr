@@ -290,6 +290,7 @@ async function resumeRecord(
 	if (isRecordStarting(record)) {
 		return err("VALIDATION_ERROR", `"${record.name}" is still starting; wait before attempting resume.`, { name: record.name, paneId: record.paneId });
 	}
+	if (!record.paneId && !record.startError) return err("VALIDATION_ERROR", `"${record.name}" is still queued — nothing to resume yet.`, { name: record.name });
 
 	// 2. substrate: resume replays the retained pi session file.
 	if (record.kind.toLowerCase() !== "pi" || !record.sessionPath) {
@@ -397,6 +398,7 @@ async function resumeRecord(
 	record.prompt = params.message ?? record.prompt;
 	record.resumeSilent = params.message === undefined;
 	record.paneId = undefined;
+	record.allocation = undefined;
 	record.startBeganAt = undefined;
 	record.startSignal = deps.signal;
 	record.startedAt = undefined;
@@ -407,6 +409,7 @@ async function resumeRecord(
 	record.goneAt = undefined;
 	record.watch = undefined;
 	record.delivery = undefined;
+	record.paneClosePending = undefined;
 	record.blockedNotified = false;
 	record.takenOver = false;
 	record.tookNotified = false;
@@ -445,7 +448,7 @@ async function resumeRecord(
 						? startR.error.details
 						: {}),
 					name: record.name,
-					paneId: record.paneId,
+					...(record.paneId ? { paneId: record.paneId } : {}),
 				},
 			},
 		};
@@ -475,6 +478,7 @@ const RESUME_DESCRIPTION =
 	"child replays the session and sits open — pass a message to give an autonomous child work. The " +
 	"run re-enters normal supervision (fleet row, watchdog, push-on-completion). Same gates as any " +
 	"spawn: kill-switch, spawn depth, parallel cap (over-cap = queued, started when a slot frees). " +
+	"New panes follow the current worker_placement setting while retaining the originating session's group ownership. " +
 	"Stance follows the agent definition: autonomous resumes auto-exit-and-push again, interactive " +
 	"resumes stay open for a human. Honest limit: resume replays the session file — anything that " +
 	"lived only in the dead process is gone; the session file is the whole truth. Non-pi agents have " +

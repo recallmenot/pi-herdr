@@ -46,7 +46,7 @@ import {
 	type ExtractedResult,
 	type ReadSidecarResult,
 } from "../sessionfile.js";
-import { spawnRecords, type SpawnRecord } from "../spawn.js";
+import { spawnRecords, isRecordStarting, type SpawnRecord } from "../spawn.js";
 
 // ---- engine types -------------------------------------------------------------
 
@@ -147,6 +147,9 @@ function lastKnownOf(record: SpawnRecord): Record<string, unknown> {
 		startedAt: record.startedAt,
 		lastStatus: record.lastStatus,
 		startError: record.startError,
+		startFailure: record.startFailure,
+		allocation: record.allocation,
+		paneId: record.paneId,
 		worktreePath: record.worktreePath,
 		...(record.sessionPath ? { sessionPath: record.sessionPath } : {}),
 		...(record.activityPath ? { activityPath: record.activityPath } : {}),
@@ -187,6 +190,7 @@ function interimProjection(
 	live?: string,
 ): { status: ResultStatus; detail?: string } {
 	return projectStatus(record, {
+		starting: isRecordStarting(record),
 		live,
 		absent: false,
 		unhealthy: live === undefined,
@@ -252,10 +256,16 @@ async function inspectRecord(
 			...base,
 			status: "gone",
 			lastKnown: lastKnownOf(record),
-			note: `the pane never started: ${record.startError}`,
+			note: record.paneId
+				? `start failed; pane ${record.paneId} was retained for inspection: ${record.startError}`
+				: `the pane never started: ${record.startError}`,
 		};
 	}
 	if (!record.paneId) return { ...base, status: "queued" };
+	if (isRecordStarting(record)) {
+		const live = await (deps.status ?? getAgentStatus)(record.paneId);
+		return { ...base, status: live.ok && live.data === "blocked" ? "blocked" : "starting", interim: true };
+	}
 
 	// 3. live pane status (coarse authority until 07's projection).
 	const statusOf = deps.status ?? getAgentStatus;

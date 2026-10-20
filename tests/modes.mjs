@@ -301,6 +301,10 @@ console.log("\n[5] Selection — spawn fork:true forces, frontmatter selects, de
 		}),
 		kinds: async () => ["pi", "claude"],
 		list: async () => [],
+		placement: {
+			allocate: async () => ({ ok: true, data: { mode: "split", paneId: `w1:p${started.length + 1}` } }),
+			resolveWorkspace: async () => { throw new Error("unexpected tab lookup"); },
+		},
 		start: async (input) => {
 			started.push(input);
 			return { ok: true, data: { agent: { pane_id: `w1:p${started.length}` } } };

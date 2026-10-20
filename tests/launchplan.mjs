@@ -433,6 +433,10 @@ console.log("\n[6] routing end to end through spawnAgent (fakes)");
 				}),
 				kinds: async () => ["pi", "claude"],
 				list: async () => [],
+				placement: {
+					allocate: async () => ({ ok: true, data: { mode: "split", paneId: `p${calls.start.length + 1}` } }),
+					resolveWorkspace: async () => { throw new Error("unexpected tab lookup"); },
+				},
 				start: async (input) => {
 					calls.start.push(input);
 					const paneId = `p${calls.start.length}`;

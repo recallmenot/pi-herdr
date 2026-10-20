@@ -14,7 +14,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { spawnAgent } from "../spawn.js";
+import { captureSpawnOrigin, spawnAgent } from "../spawn.js";
 import { saveAgent } from "../agentdefs.js";
 import type { ToolReturn } from "../env.js";
 import { BUILT_IN_AGENTS } from "../agentdefs.js";
@@ -76,8 +76,7 @@ const DESCRIPTION =
 	"`isolated: true` runs the agent in a fresh auto-created herdr-side git worktree " +
 	"(worktree stays after the agent — remove it yourself with `herdr worktree remove` or git). " +
 	"Gates, checked in order before any side effect: kill-switch, spawn depth, parallel cap. " +
-	"No layout parameters — panes split in an alternating right/down spiral " +
-		"from the previous pane; the spawner keeps the larger share.";
+	"No layout parameters. The user's worker_placement setting selects spiral splits (default) or a background worker tab in the orchestrator's workspace.";
 
 /** The inline `agent: {…}` definition schema — shared by spawn_agent and save_agent. */
 const AGENT_DEF_SCHEMA = Type.Object({
@@ -245,6 +244,7 @@ export function registerAgents(pi: ExtensionAPI): void {
 				},
 				{
 					signal,
+					origin: captureSpawnOrigin(ctx),
 					// Routing level 5 (parent session's model) + exact-model
 					// validation come from THIS session's pi context.
 					parent:

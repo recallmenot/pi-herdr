@@ -30,6 +30,8 @@
 
 import { getAgentKinds } from "./config.js";
 import { herdr } from "./herdr.js";
+import { captureSpawnOrigin, workerPlacement, type SpawnOrigin, type PlacementPlan, type PaneAllocation, type WorkerPlacement } from "./placement.js";
+export { captureSpawnOrigin, WorkerPlacement } from "./placement.js";
 import { readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -174,14 +176,16 @@ async function nextSplitFor(
 ): Promise<SplitPlan> {
 	const fallback = () =>
 		nextSplit({
-			spawnerPane: record.orchestratorPane,
+			spawnerPane: record.origin.paneId,
 			liveChildCount: record.spawnOrdinal ?? 0,
 		});
 	const sibs = [...spawnRegistry.values()]
 		.filter(
 			(r) =>
 				r !== record &&
-				r.orchestratorPane === record.orchestratorPane &&
+				r.placementMode !== "tab" &&
+				r.origin.sessionId === record.origin.sessionId &&
+				r.origin.paneId === record.origin.paneId &&
 				(r.spawnOrdinal ?? 0) < (record.spawnOrdinal ?? 0),
 		)
 		.sort((a, b) => (b.spawnOrdinal ?? 0) - (a.spawnOrdinal ?? 0));
@@ -203,7 +207,7 @@ async function nextSplitFor(
 				if (i === 0) paneIds = new Set(await (deps.paneList ?? defaultPaneList)());
 				if (sib.paneId && paneIds.has(sib.paneId)) {
 					return nextSplit({
-						spawnerPane: record.orchestratorPane,
+						spawnerPane: record.origin.paneId,
 						lastChildPane: sib.paneId,
 						liveChildCount: record.spawnOrdinal ?? 0,
 					});
@@ -651,8 +655,11 @@ export interface SpawnRecord {
 	depth: number;
 	isolated: boolean;
 	cwd?: string;
-	/** PI_HERDR_ORCHESTRATOR_PANE stamped when the spawner runs in a pane. */
-	orchestratorPane?: string;
+	/** Captured at acceptance, retained through queueing and resume. */
+	origin: SpawnOrigin;
+	/** Allocated before attachment, including failed attachment attempts. */
+	allocation?: PaneAllocation;
+	placementMode?: HerdrSettings["worker_placement"];
 	/** Accept-time ordinal among this spawner's children — the split spiral's
 	 * direction parity and sibling order. Set once at record creation. */
 	spawnOrdinal?: number;
@@ -779,9 +786,10 @@ export interface SpawnDeps {
 	 * (issue 10) reads the fleet through THIS seam: a FAILED observation is
 	 * never absence evidence, so the gone-check must see the failure. */
 	fleet?: (signal?: AbortSignal) => Promise<Result<NormalizedAgent[]>>;
-	/** Pane creation — default: startHerdrAgent (the single `agent start
-	 * --kind` launch path). */
+	placement?: Pick<WorkerPlacement, "resolveWorkspace" | "allocate">;
 	start?: typeof startHerdrAgent;
+	/** Origin captured by the caller before accepting or queueing work. */
+	origin?: SpawnOrigin;
 	/** Boot gate — default: waitForStatus(["idle"]) (event + poll). */
 	boot?: (
 		paneId: string,
@@ -798,7 +806,7 @@ export interface SpawnDeps {
 	/** Live agent_status — default: getAgentStatus. */
 	status?: (paneId: string) => Promise<Result<string>>;
 	/** Worktree creation — default: `herdr worktree create` (auto branch/path). */
-	worktree?: (projectCwd: string) => Promise<Result<string>>;
+	worktree?: (projectCwd: string, opts?: { focus: false; signal?: AbortSignal }) => Promise<Result<string>>;
 	/** Env view — default: process.env. */
 	env?: Record<string, string | undefined>;
 	/** `.md` registry folders — default: `<cwd>/.pi/agents` + global agents dir. */
@@ -868,10 +876,10 @@ const defaultSubmit = async (
 	signal?: AbortSignal,
 ): Promise<Result<true>> => submitAndWait(paneId, text, { deadline, signal });
 
-const defaultWorktree = async (projectCwd: string): Promise<Result<string>> => {
+const defaultWorktree: NonNullable<SpawnDeps["worktree"]> = async (projectCwd, opts) => {
 	const r = await herdr<unknown>(
-		createWorktreeArgs({ cwd: projectCwd /* auto branch+path */ }),
-		{ timeoutMs: 30_000 },
+		createWorktreeArgs({ cwd: projectCwd, focus: opts?.focus }),
+		{ timeoutMs: 30_000, signal: opts?.signal },
 	);
 	if (!r.ok) return r;
 	const path = extractWorktree(r.data).path;
@@ -912,13 +920,15 @@ export async function currentStatus(
 	record: SpawnRecord,
 	deps: SpawnDeps,
 ): Promise<SpawnStatus> {
-	if (!record.paneId) return record.startError ? "gone" : "queued";
+	if (record.startError) return "gone";
+	if (!record.paneId) return "queued";
 	const statusOf = deps.status ?? getAgentStatus;
 	const r = await statusOf(record.paneId);
 	if (!r.ok) {
 		// pane/agent gone (agent_not_found / NOT_FOUND) vs a transient error
 		const code = r.error.code;
 		const inner = (r.error.details as { code?: string } | undefined)?.code;
+		if (isRecordStarting(record)) return "working";
 		if (code === "NOT_FOUND" || inner === "agent_not_found") return "gone";
 		return "working"; // transient — keep the last-known-live view
 	}
@@ -977,7 +987,7 @@ function seedRecordSession(
 	// (what the launch plan rode), the file shows what actually happened.
 	const mode = record.session_mode ?? "standalone";
 	if (mode === "standalone") return null;
-	const parentSession = deps.parentSession;
+	const parentSession = record.origin.sessionFile;
 	const parentEntries = parentSession
 		? ((deps.readParentEntries ?? readParentSessionFile)(parentSession) ?? null)
 		: null;
@@ -1052,7 +1062,16 @@ export function startRecordNow(
 async function startRecord(record: SpawnRecord, deps: SpawnDeps): Promise<Result<{ paneId: string }>> {
 	record.startBeganAt = Date.now();
 	const signal = deps.signal;
-	if (signal?.aborted) return spawnErr("TIMEOUT", "Worker start aborted before launch.");
+	const settings = deps.load ? deps.load() : loadSettings(getSettingsPaths(record.origin.cwd)).effective;
+	const placement = deps.placement ?? workerPlacement;
+	record.placementMode = settings.worker_placement ?? "split";
+	let plan: PlacementPlan | undefined;
+	if (settings.worker_placement === "tab") {
+		const source = await placement.resolveWorkspace(record.origin, signal);
+		if (!source.ok) return source;
+		plan = { mode: "tab", origin: record.origin, workspaceId: source.data };
+	}
+	if (signal?.aborted) return spawnErr("TIMEOUT", "Worker start aborted before allocation.");
 
 	// 1. isolated → herdr-side worktree (auto branch+path via the existing
 	//    worktree machinery). The pane itself stays in the current workspace.
@@ -1062,7 +1081,8 @@ async function startRecord(record: SpawnRecord, deps: SpawnDeps): Promise<Result
 	let cwd = record.worktreePath ?? record.cwd;
 	if (record.isolated && !record.worktreePath) {
 		const wt = await (deps.worktree ?? defaultWorktree)(
-			record.cwd ?? process.cwd(),
+			record.cwd ?? record.origin.cwd,
+			plan?.mode === "tab" ? { focus: false, signal } : undefined,
 		);
 		if (!wt.ok) return wt;
 		record.worktreePath = wt.data;
@@ -1077,7 +1097,7 @@ async function startRecord(record: SpawnRecord, deps: SpawnDeps): Promise<Result
 	//    of the spec's own. Non-pi kinds get the same builder's passthrough
 	//    branch (plain argv, no substrate).
 	if (isPiKind(record.kind)) {
-		const seedErr = seedRecordSession(record, cwd ?? process.cwd(), deps);
+		const seedErr = seedRecordSession(record, cwd ?? record.origin.cwd, deps);
 		if (seedErr) return seedErr;
 		// A message-less resume (issue 10) skips the task artifact: the
 		// original prompt is already in the replayed session, not the task.
@@ -1099,8 +1119,8 @@ async function startRecord(record: SpawnRecord, deps: SpawnDeps): Promise<Result
 	const childEnv: Record<string, string> = {
 		PI_HERDR_SPAWN_DEPTH: String(record.depth),
 	};
-	if (record.orchestratorPane) {
-		childEnv.PI_HERDR_ORCHESTRATOR_PANE = record.orchestratorPane;
+	if (record.origin.paneId) {
+		childEnv.PI_HERDR_ORCHESTRATOR_PANE = record.origin.paneId;
 	}
 	if (record.sessionPath) {
 		childEnv.PI_HERDR_SESSION = record.sessionPath;
@@ -1113,41 +1133,29 @@ async function startRecord(record: SpawnRecord, deps: SpawnDeps): Promise<Result
 		// idle re-arm window (issue 06): after a human takeover, settle + this
 		// much quiet → the child auto-delivers (rearm-labeled) and closes.
 		childEnv.PI_HERDR_IDLE_REARM_MS = String(
-			Math.max(0, (deps.load ?? defaultLoad)().idle_rearm_minutes) * 60_000,
+			Math.max(0, settings.idle_rearm_minutes) * 60_000,
 		);
 		// Caller-stamped extras (issue 14) run LAST, so they deliberately win
 		// over any built-in of the same name. Only trusted code sets extraEnv
 		// (the workflow host, in-process) — never a tool caller.
 		Object.assign(childEnv, record.extraEnv);
 	}
-	const start = deps.start ?? startHerdrAgent;
-	// Golden-spiral layout, resolved at START time (not accept time): a queued
-	// spawn that drains later uses whatever is live then; an exited sibling's
-	// pane can't be split from. Spawn #1 splits the spawner's pane, #2+ the
-	// previous child's, alternating right → down.
-	const splitPlan = await nextSplitFor(record, deps);
-	if (signal?.aborted) return spawnErr("TIMEOUT", "Worker start aborted before launch.");
-	const startR = await start({
+	plan ??= { mode: "split", ...await nextSplitFor(record, deps) };
+	const allocated = await placement.allocate({ plan, cwd: cwd ?? record.origin.cwd, env: childEnv, signal });
+	if (!allocated.ok) return allocated;
+	record.allocation = allocated.data;
+	record.paneId = allocated.data.paneId;
+	const startR = await (deps.start ?? startHerdrAgent)({
 		name: record.name,
+		paneId: record.paneId,
 		agent: record.kind,
 		agentArgs: record.launchPlan,
-		cwd,
-		env: childEnv,
-		split: splitPlan.direction,
-		splitFrom: splitPlan.targetPaneId,
-		ratio: splitPlan.ratio,
 		signal,
 	});
-	if (!startR.ok) return startR;
-	record.paneId = normalizeAgent(startR.data.agent).paneId;
-	record.startedAt = Date.now();
-	if (!record.paneId) {
-		return spawnErr(
-			"AGENT_START_FAILED",
-			"agent start returned no pane id",
-			startR.data,
-		);
+	if (!startR.ok) {
+		return spawnErr(startR.error.code, `Agent attachment failed in pane ${record.paneId}: ${startR.error.message}`, { phase: "attachment", ...allocated.data, name: record.name });
 	}
+	record.startedAt = Date.now();
 
 	// 3. boot gate: wait for the first idle before typing the prompt.
 	const boot = await (deps.boot ?? defaultBoot)(
@@ -1159,7 +1167,7 @@ async function startRecord(record: SpawnRecord, deps: SpawnDeps): Promise<Result
 		return spawnErr(
 			"AGENT_START_FAILED",
 			`agent in pane ${record.paneId} never became idle (boot) within ${BOOT_BUDGET_MS}ms: ${boot.error.message}`,
-			{ paneId: record.paneId, name: record.name },
+			{ phase: "boot", ...record.allocation, name: record.name },
 		);
 	}
 	await sleep(SETTLE_MS);
@@ -1176,11 +1184,7 @@ async function startRecord(record: SpawnRecord, deps: SpawnDeps): Promise<Result
 	}
 	const submission = await submitRecordPrompt(record, deps);
 	if (!submission.ok) {
-		return spawnErr(
-			submission.error.code,
-			`Prompt handoff failed in pane ${record.paneId}: ${submission.error.message}`,
-			{ phase: "submission", paneId: record.paneId, name: record.name },
-		);
+		return spawnErr(submission.error.code, `Prompt handoff failed in pane ${record.paneId}: ${submission.error.message}`, { phase: "submission", ...record.allocation, name: record.name });
 	}
 	const status = await currentStatus(record, deps);
 	if (status === "idle") {
@@ -1356,6 +1360,8 @@ export interface SpawnParams {
 	 * 14: the workflow host passes PI_HERDR_SCHEMA). Single-value scalars per
 	 * the env-contract discipline; merged after the built-ins. */
 	extraEnv?: Record<string, string>;
+	/** Internal workflow ownership, recorded before the first pane can start. */
+	workflow?: string;
 	wait?: boolean | number;
 }
 
@@ -1436,6 +1442,9 @@ export async function spawnAgent(
 	deps: SpawnDeps = {},
 ): Promise<SpawnResult> {
 	const signal = deps.signal;
+
+	const captured = deps.origin ?? captureSpawnOrigin(undefined, deps.env ?? process.env);
+	const origin = { ...captured, sessionFile: captured.sessionFile ?? deps.parentSession };
 
 	// 1. specifier: `type` xor `agent` (pure). File-backed types resolve from
 	// the `.md` registry folders (project shadows global, read-at-use).
@@ -1581,10 +1590,10 @@ export async function spawnAgent(
 		// spawn cwd > definition cwd (frontmatter `cwd`); `isolated` ignores the
 		// definition's — the worktree IS the cwd choice at spawn level
 		cwd: params.cwd ?? (params.isolated ? undefined : merged.cwd),
-		orchestratorPane: env.HERDR_PANE_ID,
+		origin,
 		startSignal: signal,
 		spawnOrdinal: [...spawnRegistry.values()].filter(
-			(r) => r.orchestratorPane === env.HERDR_PANE_ID,
+			(r) => r.origin.sessionId === origin.sessionId && r.origin.paneId === origin.paneId,
 		).length,
 		spawnedAt: Date.now(),
 		submitted: false,
@@ -1595,6 +1604,7 @@ export async function spawnAgent(
 		deniedTools: merged.exclude_tools,
 		...(params.extraEnv !== undefined ? { extraEnv: params.extraEnv } : {}),
 		definition: definitionSnapshot,
+		workflow: params.workflow,
 	};
 	spawnRegistry.set(handle, record);
 
@@ -1653,7 +1663,7 @@ export async function spawnAgent(
 						? startR.error.details
 						: {}),
 					name: handle,
-					paneId: record.paneId,
+					...(record.paneId ? { paneId: record.paneId } : {}),
 				},
 			},
 		};

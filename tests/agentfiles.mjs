@@ -568,6 +568,7 @@ console.log(
 		].join("\n"),
 	);
 	const starts = [];
+	let allocated;
 	const deps = {
 		agentDirs: dirs,
 		autodrain: true,
@@ -583,8 +584,12 @@ console.log(
 		}),
 		kinds: async () => ["pi"],
 		list: async () => [],
+		placement: {
+			allocate: async (input) => { allocated = input; return { ok: true, data: { mode: "split", paneId: "w1:p9" } }; },
+			resolveWorkspace: async () => { throw new Error("unexpected tab lookup"); },
+		},
 		start: async (input) => {
-			starts.push(input);
+			starts.push({ ...allocated, ...input });
 			return { ok: true, data: { agent: { pane_id: "w1:p9", name: input.name } } };
 		},
 		boot: async () => ({ ok: true, data: true }),

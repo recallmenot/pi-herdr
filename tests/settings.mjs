@@ -450,6 +450,7 @@ console.log("\n[9] Menu: flat rows, ordering, sources, no restart markers");
 	const expectedOrder = [
 		"agents_kill_switch",
 		"default_kind",
+		"worker_placement",
 		"models.default",
 		"models.agents.<name>",
 		"max_parallel_agents",
@@ -976,6 +977,32 @@ console.log("\n[16] Menu: stop workflow run (issue 14) + kill-all stops runs");
 		},
 	});
 	assert(eq(stoppedAll, [2]), "kill-all stops live workflow runs (after confirm)");
+}
+
+console.log("\n[worker placement] Defaults, precedence, diagnostics and menu persistence");
+{
+	const p = pathsFor("placement");
+	assert(settings.loadSettings(p).effective.worker_placement === "split", "placement defaults to split");
+	writeFile(p.globalPath, JSON.stringify({ worker_placement: "tab" }));
+	let r = settings.loadSettings(p);
+	assert(r.effective.worker_placement === "tab" && r.sources.worker_placement === "global", "global tab placement and source apply");
+	writeFile(p.projectPath, JSON.stringify({ worker_placement: "split" }));
+	r = settings.loadSettings(p);
+	assert(r.effective.worker_placement === "split" && r.sources.worker_placement === "project", "project placement wins");
+	writeFile(p.projectPath, JSON.stringify({ worker_placement: "unexpected" }));
+	r = settings.loadSettings(p);
+	assert(r.effective.worker_placement === "tab" && r.sources.worker_placement === "global", "invalid project placement falls through to global");
+	assert(r.issues.some((i) => i.problem.includes("worker_placement") && i.problem.includes("split | tab")), "invalid placement is diagnosed");
+	writeFile(p.globalPath, JSON.stringify({ worker_placement: true }));
+	r = settings.loadSettings(p);
+	assert(r.effective.worker_placement === "split" && r.issues.length === 2, "invalid values in both files use split and report both");
+	writeFile(p.projectPath, "{}");
+	writeFile(p.globalPath, "{}");
+	const { ctx, calls } = scriptedCtx({ select: ["worker_placement = split (source: default)", "tab", DONE] });
+	await menu.runSettingsMenu(ctx, { paths: p, kindsFn });
+	assert(eq(calls.select[1].options, ["split", "tab"]), "placement uses the generic enum editor");
+	assert(readJson(p.projectPath).worker_placement === "tab", "default-sourced placement persists to project");
+	assert(calls.select[2].options.includes("worker_placement = tab (source: project)"), "edited placement source refreshes");
 }
 
 // ---------------------------------------------------------------------------

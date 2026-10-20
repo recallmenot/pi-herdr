@@ -773,11 +773,10 @@ assert(
 	typeof worktreesMod.createWorktreeArgs === "function",
 	"createWorktreeArgs exported from worktrees (pure argv builder)",
 );
-// create serializes workspace/cwd/branch/base/path/label/focus and always emits --json.
+// Workspace and cwd are mutually exclusive worktree sources.
 assert(
 	eq(
 		worktreesMod.createWorktreeArgs({
-			workspaceId: "w2",
 			cwd: "/repo",
 			branch: "feat",
 			base: "main",
@@ -788,8 +787,6 @@ assert(
 		[
 			"worktree",
 			"create",
-			"--workspace",
-			"w2",
 			"--cwd",
 			"/repo",
 			"--branch",
@@ -814,6 +811,10 @@ assert(
 		"--json",
 	]),
 	"createWorktreeArgs: focus:false -> --no-focus; undefined options omitted; --json always present",
+);
+assert(
+	eq(worktreesMod.createWorktreeArgs({ workspaceId: "w2", focus: false }), ["worktree", "create", "--workspace", "w2", "--no-focus", "--json"]),
+	"createWorktreeArgs: explicit workspace without cwd",
 );
 // remove: workspace/force optional, --json always (the teardown path).
 assert(

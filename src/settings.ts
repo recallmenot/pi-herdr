@@ -29,6 +29,7 @@ export interface ModelRoutingSettings {
 export interface HerdrSettings {
 	agents_kill_switch: boolean;
 	default_kind: string;
+	worker_placement: "split" | "tab";
 	models: ModelRoutingSettings;
 	max_parallel_agents: number;
 	max_spawn_depth: number;
@@ -41,6 +42,7 @@ export interface HerdrSettings {
 export type SettingKey =
 	| "agents_kill_switch"
 	| "default_kind"
+	| "worker_placement"
 	| "models.default"
 	| "models.agents.<name>"
 	| "max_parallel_agents"
@@ -79,11 +81,6 @@ export interface SettingKeyDef {
 	description: string;
 }
 
-/**
- * The nine keys, in menu order: the safety gate first, then behavior — kind,
- * model routing, caps, notifications, and the v0.6 experience knobs.
- * (Decided by wayfinder tickets 03 + 09 — settings menu, surface cut.)
- */
 export const SETTING_KEYS: readonly SettingKeyDef[] = [
 	{
 		key: "agents_kill_switch",
@@ -103,6 +100,15 @@ export const SETTING_KEYS: readonly SettingKeyDef[] = [
 		editor: "kinds",
 		description:
 			"Agent kind spawned when none is given. Validated against the live `herdr agent` kind list.",
+	},
+	{
+		key: "worker_placement",
+		group: "behavior",
+		type: "enum",
+		values: ["split", "tab"],
+		default: "split",
+		path: ["worker_placement"],
+		description: "Place new workers in spiral splits or a background worker tab owned by this Pi session.",
 	},
 	{
 		key: "models.default",
@@ -176,6 +182,7 @@ export const SETTING_KEYS: readonly SettingKeyDef[] = [
 export const DEFAULT_SETTINGS: Readonly<HerdrSettings> = Object.freeze({
 	agents_kill_switch: false,
 	default_kind: "pi",
+	worker_placement: "split",
 	models: Object.freeze({ default: "", agents: Object.freeze({}) }),
 	max_parallel_agents: 3,
 	max_spawn_depth: 2,

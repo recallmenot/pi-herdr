@@ -51,7 +51,7 @@ import {
 	type ActivityRead,
 } from "./status.js";
 import { fleetWidgetOnce } from "./widget.js";
-import { spawnRecords, type DeliveryKind, type SpawnRecord } from "./spawn.js";
+import { isRecordStarting, spawnRecords, type DeliveryKind, type SpawnRecord } from "./spawn.js";
 import { type SteeredMessage, makeDeliverySink, terminalWake } from "./push.js";
 
 // ---- types -----------------------------------------------------------------
@@ -154,6 +154,9 @@ export async function deliverOnce(deps: DeliveryDeps = {}): Promise<void> {
 	};
 
 	for (const record of records) {
+		const observed = statusByPane.get(record.paneId ?? "");
+		if (observed !== undefined && observed !== "blocked") record.blockedNotified = false;
+		if (isRecordStarting(record) && observed !== "blocked") continue;
 		// --- takeover marker → quiet note, once. Sent regardless of the
 		// notifications setting (no-wake either way; the orchestrator must
 		// learn auto-exit is off).
@@ -175,7 +178,7 @@ export async function deliverOnce(deps: DeliveryDeps = {}): Promise<void> {
 			// by the live-agent guard (the auto-exit race) retries here: once the
 			// fleet stops listing the pane, the leftover empty pane still closes
 			// (manual e2e F2 — the promise must not lose the race).
-			if (record.paneClosePending && record.paneId && !paneLive(record.paneId)) {
+			if (record.delivery.kind !== "start-error" && record.paneClosePending && record.paneId && !paneLive(record.paneId)) {
 				attemptPaneClose(deps, record);
 			}
 			continue;
@@ -186,7 +189,7 @@ export async function deliverOnce(deps: DeliveryDeps = {}): Promise<void> {
 		if (record.startError) {
 			deliverTerminal(deps, record, "start-error", {
 				content: `Agent "${record.name}" never started: ${record.startError}`,
-				details: { name: record.name, kind: "start-error" },
+				details: { name: record.name, kind: "start-error", failure: record.startFailure },
 				wake: terminalWake(notifications(deps)),
 			});
 			continue;
@@ -294,7 +297,6 @@ export async function deliverOnce(deps: DeliveryDeps = {}): Promise<void> {
 			}
 			continue;
 		}
-		record.blockedNotified = false; // fresh episodes re-wake
 		// Live idle/done WITHOUT a sidecar is not terminal for pi children
 		// (interactive stance sits idle; only the sidecar, the sentinel, or a
 		// gone resolution deliver). Non-pi children have no substrate — pull
@@ -421,7 +423,7 @@ function deliverTerminal(
 	paneLive = false,
 ): void {
 	markTerminal(record, kind, deps.now ?? (() => Date.now()));
-	closeRecordPane(deps, record, msg.details.rearm === true, paneLive);
+	if (kind !== "start-error") closeRecordPane(deps, record, msg.details.rearm === true, paneLive);
 	if (record.workflow) return;
 	pushTerminal(deps, msg, notifications(deps));
 }
@@ -501,7 +503,7 @@ export async function watchdogOnce(deps: WatchdogDeps = {}): Promise<void> {
 
 	for (const record of registry.values()) {
 		// queued / never-started / delivered records are out of scope
-		if (!record.paneId || record.startError || record.delivery) continue;
+		if (!record.paneId || record.startError || record.delivery || isRecordStarting(record)) continue;
 
 		const was = record.watch?.stalled ?? false;
 		let stalled = false;

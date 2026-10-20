@@ -526,7 +526,8 @@ console.log("\n[8] Gate order — kill-switch before depth before cap");
 // Engine harness: every herdr-facing seam injected; autodrain off so queue
 // tests drive drains explicitly (no timers, no wall-clock dependence).
 function makeDeps(opts = {}) {
-	const calls = { start: [], submit: [], worktree: [] };
+	const calls = { start: [], allocate: [], submit: [], worktree: [] };
+	const allocations = new Map();
 	const live = opts.live ?? []; // [{name, paneId, agent_status}]
 	const panesBox = { current: opts.panes ?? null }; // [paneId,...] — null → derive from live
 	return {
@@ -542,13 +543,22 @@ function makeDeps(opts = {}) {
 					.map((a) => ({ name: a.name, paneId: a.paneId })),
 			paneList: async () =>
 				panesBox.current ?? live.filter((a) => a.paneId).map((a) => a.paneId),
+			placement: {
+				resolveWorkspace: async () => { throw new Error("split mode must not resolve a workspace"); },
+				allocate: async (input) => {
+					calls.allocate.push(input);
+					const paneId = `p${calls.allocate.length}`;
+					if (opts.startDelayMs) await new Promise((r) => setTimeout(r, opts.startDelayMs));
+					allocations.set(paneId, input);
+					live.push({ paneId, agent_status: "idle" });
+					return { ok: true, data: { mode: "split", paneId } };
+				},
+			},
 			start: async (input) => {
-				if (opts.startDelayMs)
-						await new Promise((r) => setTimeout(r, opts.startDelayMs));
-				calls.start.push(input);
-				const paneId = `p${calls.start.length}`;
-				live.push({ name: input.name, paneId, agent_status: "idle" });
-				return { ok: true, data: { agent: { pane_id: paneId } } };
+				const allocation = allocations.get(input.paneId);
+				calls.start.push({ ...input, ...allocation, splitFrom: allocation.plan.targetPaneId, split: allocation.plan.direction, ratio: allocation.plan.ratio });
+				live.find((a) => a.paneId === input.paneId).name = input.name;
+				return { ok: true, data: { agent: { pane_id: input.paneId } } };
 			},
 			boot: async () => ({ ok: true, data: true }),
 			submit: async (paneId, text) => {

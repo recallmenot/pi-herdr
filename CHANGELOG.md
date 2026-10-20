@@ -64,8 +64,17 @@ E2E hardening round (manual live scenarios + the findings ledger in
   Queue callbacks stop at session shutdown and report cancelled starts.
 - Prompt submission errors no longer report successful handoff, including
   exhausted lost-turn retries and cancellation during status reconciliation.
+- Allocated panes remain inspectable during startup and after failure, without
+  false watchdog warnings or suppressing blocked startup questions.
 
 ### Added
+
+- Opt-in `worker_placement: "tab"` groups workers in a background tab in the
+  originating orchestrator's workspace. The default remains `"split"`. Ordinary
+  spawns, queued starts, resumes, and workflow children share the allocator and
+  existing launch path. No layout tools or per-spawn placement parameters are added.
+- Placement and cleanup regressions, plus `npm run test:placement:live` for
+  sandboxed acceptance. Add `-- --agents` to include real Pi workers.
 
 - **Workflows: the live progress card, real `budget.spent()`, structured
   output, and per-run stop (v0.6 issue 14 — closes v0.6).** While a run is
