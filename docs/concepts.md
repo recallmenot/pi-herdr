@@ -69,9 +69,14 @@ the detected version, e.g. `herdr: 3 agents (1 working) (0.9.0)`, and
 
 The commands the tools use (all current-surface, no legacy fallbacks):
 
-- **`herdr_spawn_agent`** (the launch machinery) — `pane split --current
-  --direction right` **then** `agent start <name> --kind <kind> --pane <id>
-  [-- <argv>]` (the pane must already exist). `agent_pane_busy` races the
+- **`herdr_spawn_agent`** allocates a pane, then attaches with
+  `agent start <name> --kind <kind> --pane <id> [-- <argv>]`.
+  The default `worker_placement: "split"` preserves the pane spiral.
+  With `"tab"`, the allocator resolves the captured source pane's workspace,
+  creates a background tab, and returns its root pane. Later starts split only
+  owned panes whose tab and workspace membership still match. Allocation is
+  serialized per session, source pane, and workspace. Attachment and boot run
+  outside that allocation lock. `agent_pane_busy` races the
   freshly-split shell's prompt, so the start retries briefly; the turn itself
   is submitted with one atomic `agent prompt <pane> <text> --wait --timeout
   <ms>` (`agent_prompt_stalled` falls back to the wait/poll dance). Every pi
@@ -90,6 +95,30 @@ The commands the tools use (all current-surface, no legacy fallbacks):
   directly; `agent read` only as the pane-tail fallback for panes this session
   did not spawn. `wait` races nothing: it polls sidecar → pane status until a
   terminal state.
+
+## Worker placement ownership
+
+The spawn record captures the accepting Pi session ID, originating pane ID,
+project cwd, and parent session file. Queue draining, resume, and workflow
+children retain that origin. Each start reads the current placement setting.
+Tab mode resolves the source workspace before isolated worktree creation and
+uses an explicit project cwd plus `--no-focus` for the worktree operation.
+
+The allocator validates Herdr's returned pane and tab IDs. A tab label is never
+an ownership key. Missing groups can be replaced, but a failed observation does
+not establish absence. A timeout or unparseable creation response leaves the
+outcome uncertain, so the allocator refuses more creation for that owner and
+workspace until reload. It does not close or move resources to repair the group.
+
+An allocation is not yet an attached agent. The record preserves the allocated
+IDs while startup is in flight. Result polling does not report a missing agent
+as gone during that interval, and the watchdog does not treat it as a stall.
+A blocked startup can still wake the parent. Failed startup records retain their
+panes and failure details for inspection.
+
+The twelve model tools are unchanged. User settings control placement; the
+model does not choose destinations. See [the setting](../README.md#group-workers-in-a-background-tab)
+and [verification coverage](worker-placement-verification.md).
 
 ## Pane surface vs agent surface
 

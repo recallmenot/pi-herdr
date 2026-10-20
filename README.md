@@ -28,11 +28,12 @@ for that.
 
 ## Platform support
 
-**Tested on Windows and macOS.** The code is platform-aware (`herdr` is spawned
-directly as a native binary, argv passed literally with `shell: false`) and is
-*expected* to work on Linux too, though that has not been verified. herdr's own
-availability on each platform follows [herdr.dev](https://herdr.dev). If you try
-Linux, please open an issue with the result.
+The existing release was tested on Windows and macOS. This branch also has
+focused worker-placement checks on Linux with Herdr 0.9.5 and Pi 1.1.0.
+Tab mode has not yet been tested on Windows, macOS, or Herdr 0.9.0.
+See [the trial guide](docs/worker-placement-trial.md) for the exact coverage.
+The code spawns the native `herdr` binary with literal argv and `shell: false`.
+Herdr's availability on each platform follows [herdr.dev](https://herdr.dev).
 
 > **macOS — launch herdr from your terminal, not `brew services`.** A launchd-managed
 > herdr server inherits macOS's minimal PATH (no `node`), and spawned `pi` agents die
@@ -498,7 +499,12 @@ self-report (e.g. `claude`/`codex`), the poll catches the settled state too.
 
 ## Settings (`/subagents config`)
 
-Run `/subagents` (or `/subagents config`) for the settings menu: one flat list of
+Run `/subagents` (or `/subagents config`) for the settings menu. If another
+extension also registers `/subagents`, Pi may suffix the command names, such as
+`/subagents:2`. Use autocomplete to select the command described as the settings
+menu, then append `config`.
+
+The menu shows one flat list of
 `key = value (source: project | global | default)` rows plus a confirmed
 **Kill all agents** action. Bool rows toggle, enum rows pick, number rows
 input, `default_kind` picks from the live kind list, `models.default` takes a
@@ -521,6 +527,7 @@ key (and per agent name for `models.agents`):
 | --- | --- | --- |
 | `agents_kill_switch` | `false` | Refuse new agent spawns. A gate only — never terminates running agents (that's the menu's Kill-all action). |
 | `default_kind` | `"pi"` | Agent kind spawned when none is given (validated against the live `herdr agent` kind list). |
+| `worker_placement` | `"split"` | `split` keeps the existing pane spiral. `tab` places workers in a background tab in the originating orchestrator pane's workspace. |
 | `models.default` | *(unset)* | Model id every spawned agent falls back to (routing level 4). Empty/absent = routing falls through to the parent session's model. |
 | `models.agents.<name>` | `{}` | Per-agent model pins (routing level 3): agent name → model id. Entries merge across both files, project winning per name. |
 | `max_parallel_agents` | `3` | Concurrency cap; spawns beyond it are queued until a slot frees. |
@@ -534,6 +541,36 @@ next operation — no restart needed. Malformed JSON in a settings file is
 reported (and ignored) rather than silently dropping your other file's values;
 the menu never overwrites a file it can't parse. The v0.5 `surface` and
 `allow_save_agent` keys are gone (see [Upgrading](#upgrading-v05--v06)).
+
+### Group workers in a background tab
+
+Select `worker_placement = tab` in `/subagents config`, or add this key to
+`<project>/.pi/herdr.json`:
+
+```json
+{
+	"worker_placement": "tab"
+}
+```
+
+The default remains `"split"`. Tab mode keeps the orchestrator's layout and
+keyboard focus unchanged. The first worker uses a new `Workers` tab's root pane;
+later workers split owned panes in that tab. Different orchestrating Pi sessions
+get separate groups, even in the same project. Grouping creates no workspace or
+Git worktree. `isolated: true` still controls checkout isolation separately.
+
+The setting takes effect when each worker starts, including queued work,
+resumes, and workflow children. Changing it does not move existing panes. A
+placement failure never falls back to splitting the orchestrator.
+
+Ownership is in memory. `/reload` leaves existing panes alone, cancels queued
+starts with a warning, and allows future starts to create new groups. Failed
+starts retain allocated panes for inspection. An uncertain creation response
+blocks further allocation for that owner and workspace until reload.
+
+See [ownership and failure handling](docs/concepts.md#worker-placement-ownership),
+[the branch trial](docs/worker-placement-trial.md), and
+[verification coverage](docs/worker-placement-verification.md).
 
 ## Upgrading v0.5 → v0.6
 
@@ -561,7 +598,7 @@ No runtime nagging, no shim tools — a clean cut ([wayfinder ticket 09](wayfind
 ## Platform notes
 
 - **Requires herdr ≥ 0.9.0** (hard floor — see Requirements). Everything above the
-  floor goes through exactly one launch path on every OS: split a pane, then
+  floor goes through exactly one launch path on every OS: allocate a pane, then
   `agent start <name> --kind <kind> --pane <id> [-- <argv>]`. herdr resolves
   the kind to its CLI itself, so npm `.cmd` shims on Windows need no special
   handling here — 0.9.0 is the release that fixed that (and the flaky
