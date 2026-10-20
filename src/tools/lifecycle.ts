@@ -46,6 +46,7 @@ import {
 	mergeSpawnSpec,
 	spawnRecords,
 	startRecordNow,
+	isRecordStarting,
 	validateKindEnforcement,
 	type SpawnDeps,
 	type SpawnRecord,
@@ -242,6 +243,8 @@ export interface ResumeResultData {
 	resumed: true;
 }
 
+const pendingResumes = new WeakSet<SpawnRecord>();
+
 /**
  * resume_agent, end to end: handle → substrate → gone-check → re-derived
  * launch plan (NOW) → gates → fresh run. The record is REUSED (same handle,
@@ -253,7 +256,6 @@ export async function resumeAgent(
 	deps: SpawnDeps = {},
 ): Promise<Result<ResumeResultData>> {
 	const target = params.target;
-	const env = deps.env ?? process.env;
 
 	// 1. registry HANDLE only — never a raw path.
 	const record = spawnRecords().get(target);
@@ -266,6 +268,27 @@ export async function resumeAgent(
 				: `no spawned agent matches "${target}" — herdr_resume_agent recovers agents THIS SESSION spawned (herdr_list_agents shows the handles).`,
 			{ target },
 		);
+	}
+
+	if (pendingResumes.has(record)) {
+		return err("VALIDATION_ERROR", `"${record.name}" already has a resume request in progress.`, { name: record.name });
+	}
+	pendingResumes.add(record);
+	try {
+		return await resumeRecord(record, params, deps);
+	} finally {
+		pendingResumes.delete(record);
+	}
+}
+
+async function resumeRecord(
+	record: SpawnRecord,
+	params: ResumeParams,
+	deps: SpawnDeps,
+): Promise<Result<ResumeResultData>> {
+	const env = deps.env ?? process.env;
+	if (isRecordStarting(record)) {
+		return err("VALIDATION_ERROR", `"${record.name}" is still starting; wait before attempting resume.`, { name: record.name, paneId: record.paneId });
 	}
 
 	// 2. substrate: resume replays the retained pi session file.
@@ -281,6 +304,9 @@ export async function resumeAgent(
 	//    cap count; a FAILED observation is never absence evidence.
 	const fleet = await (deps.fleet ?? fleetList)(deps.signal);
 	if (!fleet.ok) return { ok: false, error: fleet.error };
+	if (isRecordStarting(record)) {
+		return err("VALIDATION_ERROR", `"${record.name}" is still starting; wait before attempting resume.`, { name: record.name, paneId: record.paneId });
+	}
 	const livePaneIds = new Set(
 		fleet.data.map((a) => a.paneId).filter((p): p is string => Boolean(p)),
 	);
@@ -371,10 +397,13 @@ export async function resumeAgent(
 	record.prompt = params.message ?? record.prompt;
 	record.resumeSilent = params.message === undefined;
 	record.paneId = undefined;
+	record.startBeganAt = undefined;
+	record.startSignal = deps.signal;
 	record.startedAt = undefined;
 	record.submitted = false;
 	record.sawWorking = false;
 	record.startError = undefined;
+	record.startFailure = undefined;
 	record.goneAt = undefined;
 	record.watch = undefined;
 	record.delivery = undefined;

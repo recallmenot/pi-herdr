@@ -27,6 +27,7 @@ import { registerFleetWidget } from "./widget.js";
 import { registerSelfReport } from "./selfreport.js";
 import { registerSubagentsCommand } from "./menu.js";
 import { refreshHerdrProbe } from "./herdr.js";
+import { stopSpawnQueue } from "./spawn.js";
 import {
 	floorError,
 	formatVersion,
@@ -57,8 +58,12 @@ export default function (pi: ExtensionAPI): void {
 	// messages, takeover notes, blocked wakes — with wake governed by the
 	// `notifications` setting (blocked always wakes).
 	registerDelivery(pi);
-	pi.on("session_shutdown", () => {
+	pi.on("session_shutdown", (_e, ctx) => {
 		stopDeliveryLoop();
+		const cancelled = stopSpawnQueue();
+		if (cancelled) {
+			ctx.ui.notify(`${cancelled} queued agent start(s) cancelled by session shutdown. Spawn them again after reload.`, "warning");
+		}
 		// Workflow runs do not outlive their session (issue 12): terminate the
 		// workers; the run signal's abort closes the in-flight children host-side.
 		stopAllWorkflowRuns();

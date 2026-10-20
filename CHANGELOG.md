@@ -58,6 +58,13 @@ E2E hardening round (manual live scenarios + the findings ledger in
 
 ## [Unreleased]
 
+### Fixed
+
+- Concurrent queue drains and resumes cannot start the same record twice.
+  Queue callbacks stop at session shutdown and report cancelled starts.
+- Prompt submission errors no longer report successful handoff, including
+  exhausted lost-turn retries and cancellation during status reconciliation.
+
 ### Added
 
 - **Workflows: the live progress card, real `budget.spent()`, structured

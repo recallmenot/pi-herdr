@@ -670,6 +670,9 @@ export interface SpawnRecord {
 	lastStatus?: string;
 	/** Set when a deferred (queued) start failed — status reads "gone". */
 	startError?: string;
+	startFailure?: Err["error"];
+	/** Cancellation retained while an accepted record waits in the queue. */
+	startSignal?: AbortSignal;
 	worktreePath?: string;
 	/** Parent-owned pi session file (pi children only; seeded before launch). */
 	sessionPath?: string;
@@ -756,7 +759,7 @@ export function putSpawnRecordForTests(record: SpawnRecord): void {
 
 /** Records accepted but not yet started (the queue, in accept order). */
 function queuedRecords(): SpawnRecord[] {
-	return [...spawnRegistry.values()].filter((r) => !r.paneId && !r.startError);
+	return [...spawnRegistry.values()].filter((r) => !r.paneId && !r.startError && !isRecordStarting(r));
 }
 
 // ---- injectable seams ------------------------------------------------------------
@@ -1012,17 +1015,44 @@ function writeSessionSeedFile(path: string, lines: string[]): void {
 	writeFileSync(path, lines.join("\n") + "\n", "utf8");
 }
 
-/**
- * Start the pane for an accepted record: (worktree →) session seed → pane →
- * boot gate → prompt submission. Sets paneId/submitted/worktreePath and the
- * session substrate (sessionPath/activityPath/launchPlan) on the record.
- */
-export async function startRecordNow(
+const startingRecords = new WeakMap<SpawnRecord, Promise<Result<{ paneId: string }>>>();
+
+export function isRecordStarting(record: SpawnRecord): boolean {
+	return startingRecords.has(record);
+}
+
+/** Share one start attempt per accepted record, retaining failures for inspection. */
+export function startRecordNow(
 	record: SpawnRecord,
 	deps: SpawnDeps = {},
 ): Promise<Result<{ paneId: string }>> {
+	const pending = startingRecords.get(record);
+	if (pending) return pending;
+	if (record.startFailure) return Promise.resolve({ ok: false, error: record.startFailure });
+	if (record.paneId) return Promise.resolve({ ok: true, data: { paneId: record.paneId } });
+	const attempt = Promise.resolve()
+		.then(() => startRecord(record, deps))
+		.catch((e: unknown) => spawnErr(
+			"AGENT_START_FAILED",
+			`Worker start failed: ${e instanceof Error ? e.message : String(e)}`,
+			{ paneId: record.paneId },
+		))
+		.then((result) => {
+			if (!result.ok) {
+				record.startError = result.error.message;
+				record.startFailure = result.error;
+			}
+			return result;
+		})
+		.finally(() => { startingRecords.delete(record); });
+	startingRecords.set(record, attempt);
+	return attempt;
+}
+
+async function startRecord(record: SpawnRecord, deps: SpawnDeps): Promise<Result<{ paneId: string }>> {
 	record.startBeganAt = Date.now();
 	const signal = deps.signal;
+	if (signal?.aborted) return spawnErr("TIMEOUT", "Worker start aborted before launch.");
 
 	// 1. isolated → herdr-side worktree (auto branch+path via the existing
 	//    worktree machinery). The pane itself stays in the current workspace.
@@ -1096,6 +1126,7 @@ export async function startRecordNow(
 	// pane can't be split from. Spawn #1 splits the spawner's pane, #2+ the
 	// previous child's, alternating right → down.
 	const splitPlan = await nextSplitFor(record, deps);
+	if (signal?.aborted) return spawnErr("TIMEOUT", "Worker start aborted before launch.");
 	const startR = await start({
 		name: record.name,
 		agent: record.kind,
@@ -1143,7 +1174,14 @@ export async function startRecordNow(
 		record.submitted = true;
 		return { ok: true, data: { paneId: record.paneId } };
 	}
-	await submitRecordPrompt(record, deps);
+	const submission = await submitRecordPrompt(record, deps);
+	if (!submission.ok) {
+		return spawnErr(
+			submission.error.code,
+			`Prompt handoff failed in pane ${record.paneId}: ${submission.error.message}`,
+			{ phase: "submission", paneId: record.paneId, name: record.name },
+		);
+	}
 	const status = await currentStatus(record, deps);
 	if (status === "idle") {
 		// submission failed outright — surface it with the pane id so the
@@ -1160,27 +1198,57 @@ export async function startRecordNow(
 async function submitRecordPrompt(
 	record: SpawnRecord,
 	deps: SpawnDeps,
-): Promise<void> {
-	if (!record.paneId) return;
+): Promise<Result<true>> {
+	if (!record.paneId) return spawnErr("PANE_GONE", "No pane for prompt handoff.");
 	const submit = deps.submit ?? defaultSubmit;
 	const deadline = Date.now() + SUBMIT_CHUNK_MS;
 	for (let attempt = 0; attempt < 2; attempt++) {
 		if (attempt > 0) await sleep(2_000);
+		if (deps.signal?.aborted) return spawnErr("TIMEOUT", "Prompt handoff aborted.");
 		// Steer watermark (issue 06), stamped PER ATTEMPT: the exact text about
 		// to be typed. The child matches its input event against it so the
 		// parent's own steering is never mistaken for a human takeover — and a
 		// re-submit after a lost turn re-stamps, so the retry is not misread.
 		if (record.sessionPath) writeSteerWatermark(record.sessionPath, record.prompt);
 		const r = await submit(record.paneId, record.prompt, deadline, deps.signal);
-		if (r.ok || r.error.message !== "NOT_STARTED") break; // only retry lost turns
+		if (r.ok) {
+			record.submitted = true;
+			return r;
+		}
+		if (r.error.message === "NOT_STARTED") {
+			if (attempt === 0 && !deps.signal?.aborted) continue;
+			return r;
+		}
+		// A settle timeout can follow delivery. Only live activity proves handoff.
+		if (r.error.code === "TIMEOUT" && !deps.signal?.aborted) {
+			const status = await (deps.status ?? getAgentStatus)(record.paneId);
+			if (!deps.signal?.aborted && status.ok && (status.data === "working" || status.data === "blocked")) {
+				record.submitted = true;
+				return { ok: true, data: true };
+			}
+		}
+		return r;
 	}
-	record.submitted = true;
+	return spawnErr("AGENT_START_FAILED", "Prompt handoff never started.");
 }
 
 // ---- queue drain ---------------------------------------------------------------------
 
 const DRAIN_INTERVAL_MS = 3_000;
 let drainTimer: NodeJS.Timeout | null = null;
+const queueLifetime = new AbortController();
+
+export function stopSpawnQueue(): number {
+	queueLifetime.abort();
+	if (drainTimer) clearTimeout(drainTimer);
+	drainTimer = null;
+	const queued = queuedRecords();
+	for (const record of queued) {
+		record.startError = "Queued start cancelled by session shutdown. Spawn it again in the new session.";
+		record.startFailure = { code: "TIMEOUT", message: record.startError, details: { phase: "queue shutdown" } };
+	}
+	return queued.length;
+}
 
 /**
  * Best-effort background drain while anything is queued (self-scheduling).
@@ -1188,7 +1256,7 @@ let drainTimer: NodeJS.Timeout | null = null;
  * queue the spawn path uses.
  */
 export function ensureDrainLoop(deps: SpawnDeps): void {
-	if (drainTimer || deps.autodrain === false) return;
+	if (queueLifetime.signal.aborted || drainTimer || deps.autodrain === false) return;
 	const tick = async (): Promise<void> => {
 		drainTimer = null;
 		try {
@@ -1196,7 +1264,7 @@ export function ensureDrainLoop(deps: SpawnDeps): void {
 		} catch {
 			/* best-effort */
 		}
-		if (queuedRecords().length) {
+		if (!queueLifetime.signal.aborted && queuedRecords().length) {
 			drainTimer = setTimeout(tick, DRAIN_INTERVAL_MS);
 			drainTimer.unref?.();
 		}
@@ -1213,7 +1281,7 @@ export function ensureDrainLoop(deps: SpawnDeps): void {
  */
 export async function drainQueueOnce(deps: SpawnDeps = {}): Promise<number> {
 	const queued = queuedRecords();
-	if (!queued.length) return 0;
+	if (queueLifetime.signal.aborted || !queued.length) return 0;
 	const live = await (deps.list ?? defaultList)();
 	const livePaneIds = new Set(
 		live.map((a) => a.paneId).filter((p): p is string => Boolean(p)),
@@ -1225,9 +1293,13 @@ export async function drainQueueOnce(deps: SpawnDeps = {}): Promise<number> {
 	let free = Math.max(0, cap - running);
 	let started = 0;
 	for (const record of queued) {
-		if (free <= 0) break;
+		if (queueLifetime.signal.aborted || free <= 0) break;
+		if (record.paneId || record.startError || isRecordStarting(record)) continue;
 		free--;
-		const r = await startRecordNow(record, deps);
+		const signal = record.startSignal
+			? AbortSignal.any([record.startSignal, queueLifetime.signal])
+			: queueLifetime.signal;
+		const r = await startRecordNow(record, { ...deps, signal });
 		if (!r.ok) {
 			record.startError = r.error.message;
 			continue; // slot stays used-for-now; a later pass may retry nothing (record marked)
@@ -1510,6 +1582,7 @@ export async function spawnAgent(
 		// definition's — the worktree IS the cwd choice at spawn level
 		cwd: params.cwd ?? (params.isolated ? undefined : merged.cwd),
 		orchestratorPane: env.HERDR_PANE_ID,
+		startSignal: signal,
 		spawnOrdinal: [...spawnRegistry.values()].filter(
 			(r) => r.orchestratorPane === env.HERDR_PANE_ID,
 		).length,
